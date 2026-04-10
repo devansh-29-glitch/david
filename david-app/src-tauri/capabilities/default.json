@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability.json",
+  "identifier": "default",
+  "description": "David AI capabilities",
+  "platforms": ["macOS", "windows"],
+  "windows": ["orb", "auth"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-always-on-top",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "store:allow-load",
+    "store:allow-set",
+    "store:allow-get",
+    "store:allow-save",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text"
+  ]
+}

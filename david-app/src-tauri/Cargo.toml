@@ -1,0 +1,71 @@
+[package]
+name = "david"
+version = "1.0.0"
+description = "David — An Ambient AI That Lives With You"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "david_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "david"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-store = "2"
+tauri-plugin-clipboard-manager = "2"
+
+# Screen capture
+image = { version = "0.25", features = ["jpeg"] }
+base64 = "0.22"
+
+# Input monitoring
+rdev = "0.5"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+anyhow = "1"
+log = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+# macOS screen capture
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.23", features = ["display_full"] }
+
+# Windows APIs
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

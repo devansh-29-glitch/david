@@ -1,0 +1,315 @@
+name: Build David DMG
+
+# Triggers:
+# - Push tag v1.0.0 → builds DMG + creates GitHub Release
+# - Manual run via Actions UI → builds DMG only (no release)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Rust ───────────────────────────────────────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workdir: david-app/src-tauri
+
+      # ── 3. Bun ────────────────────────────────────────────────────────────────
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        working-directory: david-app
+        run: bun install
+
+      # ── 4. Python backend → standalone binary ─────────────────────────────────
+      # PyInstaller bundles the entire Python app into one executable.
+      # Users never need Python installed.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        working-directory: david-api
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build backend binary with PyInstaller
+        working-directory: david-api
+        run: |
+          pyinstaller \
+            --onefile \
+            --name david-backend \
+            --hidden-import psycopg2 \
+            --hidden-import passlib.handlers.bcrypt \
+            --distpath ../david-app/src-tauri/resources \
+            main.py
+          echo "Backend binary size:"
+          ls -lh ../david-app/src-tauri/resources/david-backend
+
+      # ── 5. Download Whisper model ─────────────────────────────────────────────
+      - name: Create models directory
+        run: mkdir -p david-app/src-tauri/resources/models
+
+      - name: Download Whisper small.en model
+        run: |
+          echo "Downloading Whisper model (~466MB)..."
+          curl -L --retry 5 --retry-delay 10 \
+            -o david-app/src-tauri/resources/models/ggml-small.en.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
+          echo "Whisper model size:"
+          ls -lh david-app/src-tauri/resources/models/ggml-small.en.bin
+
+      - name: Download Silero VAD model
+        run: |
+          curl -L --retry 5 --retry-delay 10 \
+            -o david-app/src-tauri/resources/models/silero_vad_v4.onnx \
+            "https://blob.handy.computer/silero_vad_v4.onnx"
+
+      # ── 6. Download Fish Speech ───────────────────────────────────────────────
+      # Fish Speech 1.5 runs locally on user's Mac for TTS.
+      # We bundle the model weights and a simple server script.
+      - name: Setup Fish Speech
+        run: |
+          mkdir -p david-app/src-tauri/resources/fish-speech
+
+          # Install huggingface_hub to download model
+          pip install huggingface_hub
+
+          # Download Fish Speech 1.5 model weights
+          python3 << 'EOF'
+          from huggingface_hub import hf_hub_download
+          import shutil, os
+
+          dest = "david-app/src-tauri/resources/fish-speech"
+          os.makedirs(dest, exist_ok=True)
+
+          files_to_download = [
+              ("fishaudio/fish-speech-1.5", "model.pth"),
+              ("fishaudio/fish-speech-1.5", "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"),
+          ]
+
+          for repo, filename in files_to_download:
+              try:
+                  path = hf_hub_download(repo_id=repo, filename=filename, local_dir=dest)
+                  print(f"Downloaded: {filename}")
+              except Exception as e:
+                  print(f"Warning: Could not download {filename}: {e}")
+          EOF
+
+          # Write the Fish Speech TTS server script
+          cat > david-app/src-tauri/resources/fish-speech/tts_server.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """
+          David TTS Server
+          Wraps Fish Speech for local voice output on port 8765.
+          Started automatically by David on launch.
+          Falls back silently if Fish Speech models are unavailable.
+          """
+          import os
+          import sys
+          import json
+          import subprocess
+          import tempfile
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          from pathlib import Path
+
+          PORT = 8765
+          MODEL_DIR = Path(__file__).parent
+
+          def is_ready():
+              model_file = MODEL_DIR / "model.pth"
+              return model_file.exists()
+
+          class TTSHandler(BaseHTTPRequestHandler):
+              def log_message(self, *args):
+                  pass  # suppress access logs
+
+              def do_GET(self):
+                  if self.path == "/health":
+                      body = json.dumps({"status": "ok", "model_ready": is_ready()}).encode()
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Content-Length", len(body))
+                      self.end_headers()
+                      self.wfile.write(body)
+
+              def do_POST(self):
+                  if self.path == "/v1/tts":
+                      length = int(self.headers.get("Content-Length", 0))
+                      body = json.loads(self.rfile.read(length))
+                      text = body.get("text", "")
+
+                      if not text or not is_ready():
+                          self.send_response(503)
+                          self.end_headers()
+                          return
+
+                      try:
+                          audio_bytes = self._synthesize(text)
+                          self.send_response(200)
+                          self.send_header("Content-Type", "audio/mpeg")
+                          self.send_header("Content-Length", len(audio_bytes))
+                          self.end_headers()
+                          self.wfile.write(audio_bytes)
+                      except Exception as e:
+                          print(f"TTS error: {e}")
+                          self.send_response(500)
+                          self.end_headers()
+
+              def _synthesize(self, text: str) -> bytes:
+                  with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                      out_path = f.name
+
+                  try:
+                      result = subprocess.run([
+                          sys.executable, "-m", "fish_speech.inference",
+                          "--text", text,
+                          "--checkpoint-path", str(MODEL_DIR / "model.pth"),
+                          "--output", out_path,
+                      ], capture_output=True, timeout=30, cwd=str(MODEL_DIR))
+
+                      if result.returncode == 0 and os.path.exists(out_path):
+                          with open(out_path, "rb") as f:
+                              return f.read()
+                      raise Exception(result.stderr.decode())
+                  finally:
+                      if os.path.exists(out_path):
+                          os.unlink(out_path)
+
+          if __name__ == "__main__":
+              print(f"David TTS server starting on port {PORT}")
+              print(f"Model ready: {is_ready()}")
+              server = HTTPServer(("127.0.0.1", PORT), TTSHandler)
+              server.serve_forever()
+          PYEOF
+
+          echo "Fish Speech setup complete"
+          ls -la david-app/src-tauri/resources/fish-speech/
+
+      # ── 7. Create app icons ───────────────────────────────────────────────────
+      - name: Create placeholder icons
+        working-directory: david-app/src-tauri
+        run: |
+          mkdir -p icons
+          python3 << 'EOF'
+          import struct, zlib
+
+          def make_png(size, r=99, g=102, b=241):
+              w = h = size
+              raw = b''.join(b'\x00' + bytes([r, g, b, 255] * w) for _ in range(h))
+              def chunk(t, d):
+                  c = struct.pack('>I', len(d)) + t + d
+                  return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+              return (b'\x89PNG\r\n\x1a\n' +
+                      chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
+                      chunk(b'IDAT', zlib.compress(raw)) +
+                      chunk(b'IEND', b''))
+
+          for size, name in [(32, '32x32'), (128, '128x128'), (256, '128x128@2x')]:
+              with open(f'icons/{name}.png', 'wb') as f:
+                  f.write(make_png(size))
+
+          # icon.icns (macOS) — minimal valid ICNS
+          with open('icons/icon.icns', 'wb') as f:
+              png_data = make_png(512)
+              f.write(b'icns')
+              total = 8 + 8 + len(png_data)
+              f.write(struct.pack('>I', total))
+              f.write(b'ic09')
+              f.write(struct.pack('>I', 8 + len(png_data)))
+              f.write(png_data)
+
+          # icon.ico (Windows)
+          with open('icons/icon.ico', 'wb') as f:
+              f.write(make_png(64))
+
+          print("Icons created successfully")
+          EOF
+
+      # ── 8. Build Tauri (Universal Binary) ─────────────────────────────────────
+      - name: Build Tauri app
+        working-directory: david-app
+        env:
+          # No signing for v1 — users will right-click → Open
+          TAURI_SIGNING_PRIVATE_KEY: ""
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          bun run tauri build --target universal-apple-darwin
+
+      # ── 9. Find DMG ───────────────────────────────────────────────────────────
+      - name: Find the DMG file
+        id: dmg
+        run: |
+          DMG=$(find david-app/src-tauri/target -name "*.dmg" | head -1)
+          if [ -z "$DMG" ]; then
+            echo "ERROR: No DMG found. Build may have failed silently."
+            find david-app/src-tauri/target -name "*.app" | head -5
+            exit 1
+          fi
+          echo "path=$DMG" >> $GITHUB_OUTPUT
+          echo "DMG found at: $DMG"
+          ls -lh "$DMG"
+
+      # ── 10. Upload as artifact (always) ──────────────────────────────────────
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: David-macOS-DMG
+          path: ${{ steps.dmg.outputs.path }}
+          retention-days: 30
+
+      # ── 11. Create GitHub Release (on version tags only) ─────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: David ${{ github.ref_name }}
+          body: |
+            ## David ${{ github.ref_name }}
+
+            **An ambient AI that lives with you.**
+
+            ### How to install
+            1. Download `David.dmg` below
+            2. Open the DMG → drag David to Applications
+            3. **Right-click David → Open** (do NOT double-click — Gatekeeper will block it)
+            4. Click "Open" on the security warning
+            5. Grant Screen Recording permission when prompted (required)
+            6. Grant Microphone permission when prompted (required for voice)
+            7. Create your account in the sign-in window
+            8. The orb appears on your screen — David is live
+
+            ### What's in this release
+            - Always-on screen vision (Gemini 2.5 Flash)
+            - Unprompted speaking when you're confused or stuck
+            - Wake word "David" activates voice mode
+            - Text rewriting via orb panel
+            - Audio detection — silent mode when music plays
+            - Smart screenshot frequency (1.6s / 3.4s / 7.9s)
+            - Free tier: 25 AI interactions / day
+
+          files: ${{ steps.dmg.outputs.path }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

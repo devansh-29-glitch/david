@@ -1,0 +1,31 @@
+# JS
+node_modules/
+david-app/dist/
+
+# Rust
+david-app/src-tauri/target/
+
+# Python
+__pycache__/
+*.pyc
+david-api/dist/
+david-api/build/
+david-api/*.spec
+
+# Environment — NEVER commit
+.env
+**/.env
+
+# Models — downloaded by CI
+david-app/src-tauri/resources/models/
+david-app/src-tauri/resources/fish-speech/checkpoints/
+david-app/src-tauri/resources/david-backend
+david-app/src-tauri/resources/david-backend.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
