@@ -118,9 +118,16 @@ jobs:
               f.write(struct.pack('>I', 8 + len(png)))
               f.write(png)
 
-          # icon.ico (Windows format)
+          # icon.ico - proper ICO format
+          import struct
+          png_64 = make_rgba_png(64)
           with open('icons/icon.ico', 'wb') as f:
-              f.write(make_rgba_png(64))
+              # ICO header: reserved=0, type=1 (icon), count=1
+              f.write(struct.pack('<HHH', 0, 1, 1))
+              # Directory entry: width, height, colors, reserved, planes, bitcount, size, offset
+              offset = 6 + 16  # header + one directory entry
+              f.write(struct.pack('<BBBBHHII', 64, 64, 0, 0, 1, 32, len(png_64), offset))
+              f.write(png_64)
 
           print("All icons created successfully")
           EOF
