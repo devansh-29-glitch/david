@@ -28,6 +28,8 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-cache-v2
         
 
       # ── 3. Bun ────────────────────────────────────────────────────────────────
