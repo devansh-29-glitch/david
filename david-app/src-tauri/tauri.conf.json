@@ -65,7 +65,7 @@
       "entitlements": "entitlements.plist"
     },
     "resources": [
-      "resources/models/*",
+      "resources/models/*"
       
     ]
   }
