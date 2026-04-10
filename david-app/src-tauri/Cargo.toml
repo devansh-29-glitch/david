@@ -46,8 +46,6 @@ log = "0.4"
 uuid = { version = "1", features = ["v4"] }
 
 # macOS screen capture
-[target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = { version = "0.24", features = ["display_full"] }
 
 # Windows APIs
 [target.'cfg(target_os = "windows")'.dependencies]
