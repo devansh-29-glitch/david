@@ -1,14 +1,3 @@
-/// David v1 — Tauri Application Core
-/// =====================================
-/// Wires together:
-/// - Screen capture (macOS ScreenCaptureKit)
-/// - System audio detection (Core Audio)
-/// - Activity tracking (keyboard + mouse via rdev)
-/// - Smart screenshot frequency (1.6 / 3.4 / 7.9 seconds)
-/// - Fish Speech TTS server management (local subprocess)
-/// - Wake word detection ("David")
-/// - All communication with Railway backend
-
 mod screen_capture;
 mod audio_detector;
 mod activity_tracker;
@@ -20,8 +9,9 @@ pub mod commands;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Manager, Emitter};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tokio::time::sleep;
-use log::{info, error, warn};
+use log::{info, error};
 use uuid::Uuid;
 
 use screen_capture::ScreenCapture;
@@ -32,7 +22,6 @@ use backend_client::BackendClient;
 
 pub const BACKEND_URL: &str = "https://david-api-production.up.railway.app";
 
-/// Shared state passed around the app
 pub struct DavidState {
     pub auth_token: Mutex<Option<String>>,
     pub user_name: Mutex<String>,
@@ -66,9 +55,7 @@ impl DavidState {
 
     pub fn get_screenshot_interval(&self) -> Duration {
         let audio = *self.audio_playing.lock().unwrap();
-        if audio {
-            return Duration::from_millis(7900);
-        }
+        if audio { return Duration::from_millis(7900); }
         match *self.activity_level.lock().unwrap() {
             ActivityLevel::Rigorous => Duration::from_millis(1600),
             ActivityLevel::Slow => Duration::from_millis(3400),
@@ -101,21 +88,19 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
 
-            // ── Start Fish Speech TTS server ───────────────────────────────────
-            let resource_dir = app.path().resource_dir()
-                .expect("Could not find resource dir");
-
+            // Start Fish Speech TTS server
+            let resource_dir = app.path().resource_dir().expect("Could not find resource dir");
             let fish_manager = FishSpeechManager::new(resource_dir.clone());
             let fish_clone = fish_manager.clone();
             std::thread::spawn(move || {
                 match fish_clone.start() {
-                    Ok(_) => info!("Fish Speech TTS server ready on port 8765"),
-                    Err(e) => warn!("Fish Speech failed to start: {}. Voice output will use Gemini TTS.", e),
+                    Ok(_) => info!("Fish Speech TTS server ready"),
+                    Err(e) => info!("Fish Speech unavailable: {}. Voice will use Gemini TTS.", e),
                 }
             });
             app.manage(Arc::new(fish_manager));
 
-            // ── Start audio detector ───────────────────────────────────────────
+            // Start audio detector
             let state_audio = state.clone();
             let app_handle_audio = app_handle.clone();
             tokio::spawn(async move {
@@ -124,12 +109,7 @@ pub fn run() {
                     let playing = detector.is_audio_playing();
                     let changed = {
                         let mut current = state_audio.audio_playing.lock().unwrap();
-                        if *current != playing {
-                            *current = playing;
-                            true
-                        } else {
-                            false
-                        }
+                        if *current != playing { *current = playing; true } else { false }
                     };
                     if changed {
                         let _ = app_handle_audio.emit("audio-state-changed", playing);
@@ -138,7 +118,7 @@ pub fn run() {
                 }
             });
 
-            // ── Start activity tracker ─────────────────────────────────────────
+            // Start activity tracker
             let state_activity = state.clone();
             let app_handle_activity = app_handle.clone();
             tokio::spawn(async move {
@@ -146,28 +126,23 @@ pub fn run() {
                 tracker.start(state_activity, app_handle_activity);
             });
 
-            // ── Smart screenshot + confusion detection loop ────────────────────
+            // Smart screenshot + confusion detection loop
             let state_screen = state.clone();
             let app_handle_screen = app_handle.clone();
             tokio::spawn(async move {
                 let capture = ScreenCapture::new();
                 let client = BackendClient::new(BACKEND_URL);
-
-                // Wait 2 seconds before starting
-                sleep(Duration::from_secs(2)).await;
+                sleep(Duration::from_secs(3)).await;
 
                 loop {
                     let interval = state_screen.get_screenshot_interval();
                     sleep(interval).await;
 
                     let token = state_screen.get_token();
-                    if token.is_none() {
-                        continue; // Not logged in yet
-                    }
+                    if token.is_none() { continue; }
 
                     match capture.capture_jpeg_base64(55) {
                         Ok(screenshot_b64) => {
-                            // Store latest screenshot for chat context
                             *state_screen.last_screenshot_b64.lock().unwrap() = Some(screenshot_b64.clone());
 
                             let activity = format!("{:?}", *state_screen.activity_level.lock().unwrap()).to_lowercase();
@@ -180,26 +155,18 @@ pub fn run() {
 
                             match client.send_screenshot(
                                 token.as_deref().unwrap(),
-                                &screenshot_b64,
-                                &activity,
-                                audio,
-                                dwell,
-                                wd,
-                                &app_name,
-                                &session_id,
-                                time_since,
+                                &screenshot_b64, &activity, audio,
+                                dwell, wd, &app_name, &session_id, time_since,
                             ).await {
                                 Ok(response) if response.should_speak => {
-                                    // Update last unprompted time
                                     *state_screen.last_unprompted_time.lock().unwrap() = Instant::now();
-
                                     let _ = app_handle_screen.emit("david-speaks", serde_json::json!({
                                         "message": response.message,
                                         "mode": response.mode,
                                         "audio_b64": response.audio_b64,
                                     }));
                                 }
-                                Err(e) => error!("Screenshot send error: {}", e),
+                                Err(e) => error!("Screenshot error: {}", e),
                                 _ => {}
                             }
                         }
@@ -208,13 +175,13 @@ pub fn run() {
                 }
             });
 
-            // ── Global hotkey: Cmd+Shift+D ─────────────────────────────────────
+            // Global hotkey
             let app_handle_hotkey = app_handle.clone();
             app.global_shortcut()
                 .on_shortcut("CmdOrCtrl+Shift+D", move |_app, _shortcut, _event| {
                     let _ = app_handle_hotkey.emit("toggle-orb", ());
                 })
-                .expect("Failed to register hotkey Cmd+Shift+D");
+                .expect("Failed to register hotkey");
 
             info!("David v1 started. Session: {}", state.session_id);
             Ok(())
